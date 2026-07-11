@@ -516,9 +516,11 @@ def main() -> int:
 
     p_it = sub.add_parser("tongues", help="List the six sacred tongues with their weights")
 
+    p_st = sub.add_parser("selftest", help="Run round-trip + integrity self-checks")
+
     args = parser.parse_args()
 
-    if not args.cmd:
+    if not args.cmd or args.cmd == "selftest":
         return selftest()
 
     if args.cmd == "encode":
