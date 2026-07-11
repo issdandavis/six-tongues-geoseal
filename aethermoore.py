@@ -518,6 +518,10 @@ def main() -> int:
 
     p_st = sub.add_parser("selftest", help="Run round-trip + integrity self-checks")
 
+    p_pg = sub.add_parser("polyglot", help="Represent a concept across real languages (Python/JS/Rust/Haskell/C++/Julia); --run to execute + cross-check")
+    p_pg.add_argument("op", nargs="?", help="op-class to represent, or 'list'")
+    p_pg.add_argument("--run", action="store_true", help="execute available toolchains and show which languages agree")
+
     args = parser.parse_args()
 
     if not args.cmd or args.cmd == "selftest":
@@ -620,6 +624,39 @@ def main() -> int:
                 "(OLLAMA_HOST=http://127.0.0.1:11434) for private answers.",
                 file=sys.stderr,
             )
+        return 0
+
+    if args.cmd == "polyglot":
+        import polyglot as pg
+        if not args.op or args.op == "list":
+            print("op-classes:", ", ".join(pg.OPS))
+            print("langs:     ", ", ".join(
+                f"{l}{'' if pg.available(l) else '(represent-only)'}" for l in pg.LANGS))
+            print("\nusage: aethermoore.py polyglot <op> [--run]")
+            return 0
+        if args.op not in pg.OPS:
+            print(f"error: unknown op-class '{args.op}'. choose from: {', '.join(pg.OPS)}", file=sys.stderr)
+            return 2
+        reps = pg.represent(args.op)
+        print(f"# concept '{args.op}' represented across languages\n")
+        for lang in pg.LANGS:
+            src = reps[lang].replace("\n", "\n    ")
+            print(f"[{lang}]{'' if pg.available(lang) else '  (represent-only: no toolchain)'}\n    {src}\n")
+        if args.run:
+            print("# execution cross-check (run each present toolchain):")
+            values = {lang: pg.run_lang(lang, reps[lang]) for lang in pg.LANGS}
+            for lang in pg.LANGS:
+                print(f"  {lang:11} = {values[lang]}")
+            ran = {l: v for l, v in values.items()
+                   if v not in ("toolchain-not-found", "COMPILE-ERR") and not v.startswith("ERR:")}
+            cs = pg.camps(ran)
+            print("\n  camps (agreement first):")
+            for val, langs in cs:
+                print(f"    {val!r:>14} : {', '.join(langs)}")
+            if len(cs) == 1 and ran:
+                print("\n  -> all runnable languages AGREE: this concept is language-independent.")
+            elif len(cs) > 1:
+                print("\n  -> languages SPLIT into camps: a real semantic difference, surfaced by the box.")
         return 0
 
     parser.print_help()

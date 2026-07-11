@@ -54,6 +54,35 @@ Wraps a payload with a context envelope:
 
 Any tampering (payload, context, or key) causes verification to fail. Real PQC encryption plugs in underneath via the `GEOSEAL_KEY` environment variable.
 
+### Polyglot representation (represent + execute-to-verify)
+
+Represent one small concept across **six real languages** — Python, JavaScript,
+Rust, Haskell, C++, Julia — and, with `--run`, execute each present toolchain and
+show which languages **agree** and which split into **camps**. Representation is
+pure text (always works); execution is best-effort and honestly labels any
+missing toolchain as `represent-only` / `toolchain-not-found`.
+
+```bash
+python aethermoore.py polyglot list
+python aethermoore.py polyglot scalar --run       # all agree -> language-independent
+python aethermoore.py polyglot neg_intdiv --run    # camp split: floor vs truncate
+```
+
+Example (`neg_intdiv`, i.e. `-7 / 2` as integers):
+
+```
+  camps (agreement first):
+    '-3' : JavaScript, Rust, Julia      (truncate toward zero)
+    '-4' : Python, Haskell              (floor)
+  -> languages SPLIT into camps: a real semantic difference, surfaced by the box.
+```
+
+This is the "creativity inside a verifiable box" idea made concrete: a concept
+is proposed once, represented many ways, and **cross-checked by execution** — so
+where the languages disagree, the box surfaces a genuine semantic fact rather
+than hiding it. The deeper self-verifying op-class router lives in `loom`; the
+snippets here are vendored from it and extended with C++.
+
 ### Explain (Free AI Navigation)
 
 New: ask the built-in helper to explain any tongue or operation.
