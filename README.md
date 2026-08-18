@@ -7,6 +7,10 @@ A **self-contained Python CLI** that implements the core of the SCBE-AETHERMOORE
 - Six Sacred Tongues bijective tokenization (256 tokens per tongue)
 - Cross-tongue translation (KO → AV → DR, etc.)
 - Blend / unblend of multi-tongue streams
+- Entropy/compressibility diagnostics for a payload and its token surface
+- Prediction/compression diagnostics against a traditional next-byte baseline
+- Aperiodic relational projection benchmark with parameter-matched controls
+- Trit light-class overlay on binary prefix-code space
 - GeoSeal: context-aware envelope with HMAC-SHA256 integrity
 - Built-in `selftest` for round-trip and integrity checks
 - **`explain` subcommand** — free AI navigation via Ollama or HuggingFace
@@ -25,6 +29,9 @@ Designed for **secure AI-to-AI messaging**, semantic steganography, and as a pla
 - Byte ↔ token mapping is **bijective** (no collisions, full coverage)
 - Human-readable, LLM-friendly token streams
 - Deterministic: same input always produces the same output
+- Byte-preserving: this is an encoding layer, so use `entropy` when you need to
+  measure compressibility rather than assume that a different token surface is
+  smaller
 
 | Tongue | Name | Domain | φ Weight |
 |--------|------|--------|----------|
@@ -42,6 +49,111 @@ Re-encode a token stream from one tongue to another without touching the underly
 ### Blend / Unblend
 
 Interleave multiple tongues according to a pattern (e.g. `KO:2,AV:1,DR:1`). Perfectly reversible.
+
+### Entropy / Compressibility
+
+Measure the Shannon byte-entropy lower bound, raw zlib size, token surface size,
+and compressed token surface size for the same payload:
+
+```bash
+python aethermoore.py entropy --tongue KO --text "hello hello hello"
+```
+
+This is the practical tokenizer takeaway from the information-theory framing:
+bijective tongue tokens preserve the original bytes; they do not by themselves
+compress content. Real compression claims should be measured on a corpus.
+
+### Prediction Compression
+
+Compare a standard causal next-byte predictor against a trit-class projection
+using the same metric used by next-token training: cross-entropy as ideal
+compression bits. Scores are normalized as `bits/input_byte`, so lower is
+better and the byte and trit paths can be compared directly.
+
+```bash
+python aethermoore.py predict-compress --max-order 3 --text "hello hello hello"
+```
+
+The trit projection maps each byte to six base-3 symbols and scores next-trit
+prediction against the traditional byte predictor. It is a local stdlib
+diagnostic, not a trained neural network.
+
+### Relational Projection Benchmark
+
+Test the non-self-similar projection-depth idea as a causal next-trit model:
+
+```powershell
+Get-Content -Raw README.md | python aethermoore.py projection-benchmark
+Get-Content -Raw README.md | python aethermoore.py projection-benchmark --ablations
+Get-Content -Raw README.md | python aethermoore.py projection-benchmark --ablations --layered-copies 4
+```
+
+The working name is the **quasi-metronomic quadratic stenographic array**:
+"quasi" is the aperiodic global stack, "metronomic" is the rational local ray
+rhythm, "quadratic" is the all-pairs `O(context^2)` relation array, and
+"stenographic" is prediction measured as compression bits.
+
+The model starts with an eight-trit context, applies fixed random spatial
+distortion, overlays four rational-angle relation rays at each of three depths,
+and advances between depths by an irrational golden-ratio phase. Dyadic
+`1, 1/2, 1/4` projections reinforce local self-similar alignments while the
+distortion and irrational depth stack keep the overall process aperiodic and
+non-self-similar. A prior-depth projection backdrop supplies the self/non-self
+alignment channel.
+
+This is math only; it does not render the array. The nonlinear projection array
+feeds a trained three-class softmax head. Its held-out cross-entropy is compared
+over three paired seeds with:
+
+- a duplicated flat-context next-trit control
+- a scrambled-angle/scale projection control
+- the proposed aligned projection
+
+All three expose 48 features to the same 147-parameter prediction head: 24 raw
+trit-context features plus a matched 24-feature second branch. A
+`SUPPORTED` result must beat both controls by more than twice their pooled
+standard deviation. Smaller positive results are labeled `UNDERPOWERED`;
+failure to beat both controls is `NO_LIFT`.
+
+`--ablations` adds five equal-budget component tests and a separate synthesis
+verdict. The synthesis keeps one seeded random local ray array, repeats it
+through depth with the irrational golden-ratio rotation, and leaves scales
+random. This tests the measured useful part without retaining rational local
+rays or dyadic scales merely because they were in the original description.
+The component comparisons hold the other geometry choices fixed wherever one
+factor is being tested.
+
+`--layered-copies N` tests whether several fixed projection arrays can stack a
+weak gain without adding trainable parameters. The default `--layered-mode
+probability` gives every view the same 147-parameter head and mixes their class
+probabilities. `--layered-mode feature --layered-decay 0.5` instead overlays
+the fixed feature branches at weights `1, 1/2, 1/4, ...`. Both receive a
+copy-matched scrambled control.
+
+Use `--split-fraction 0.6`, `0.7`, or `0.8` to move the causal boundary without
+changing the capped train/test sample budgets. Current evidence spans all three
+positions; a projection-seed result at one split is not treated as sufficient.
+
+Use `--projection-gain N` to test the projection-branch strength. The same
+gain is applied to aligned and scrambled projections, so it cannot grant the
+candidate extra trainable capacity. `--layer-gain N` controls recurrent
+backdrop reinforcement across depth, again identically for both arms.
+`--quadratic-gain N` adds second-order pair coherence, and
+`--reinforcement-gain N` multiplies signal by self-alignment. Every ablation is
+applied to both projected arms.
+
+### Trit Overlay
+
+Project a ternary prefix table onto a fixed-depth binary prefix table without
+rendering an image. Trit digits map to the three SCBE multipath band classes:
+`0=blocker(-1)`, `1=reader(0)`, `2=writer(+1)`.
+
+```bash
+python aethermoore.py trit-overlay --trit-depth 2 --binary-depth 4
+```
+
+This keeps the compression idea mathematical: ternary intervals are compared
+against binary code cells, and their ideal binary cost is `depth * log2(3)`.
 
 ### GeoSeal
 
@@ -134,6 +246,10 @@ python aethermoore.py                      # run selftest
 
 ```bash
 python aethermoore.py encode --tongue KO --text "hello"
+python aethermoore.py entropy --tongue KO --text "hello hello hello"
+python aethermoore.py predict-compress --max-order 3 --text "hello hello hello"
+Get-Content -Raw README.md | python aethermoore.py projection-benchmark
+python aethermoore.py trit-overlay --trit-depth 2 --binary-depth 4
 ```
 
 Pipe form:
@@ -208,7 +324,7 @@ python aethermoore.py tongues
 python aethermoore.py
 # selftest ok
 #   6 tongues, 256 tokens each, 1536 total tokens
-#   encode/decode/xlate/blend/unblend/geoseal all pass
+#   encode/decode/xlate/blend/unblend/geoseal/prediction/projection all pass
 ```
 
 ---
@@ -222,6 +338,10 @@ python aethermoore.py
 | `xlate --src A --dst B --text STR` | Cross-tongue translate |
 | `blend --pattern P --text STR` | Interleave bytes across tongues |
 | `unblend --pattern P --text STR` | Unblend a mixed stream |
+| `entropy --tongue T --text STR` | Measure entropy and token-surface overhead |
+| `predict-compress --text STR` | Compare byte and trit causal compression scores |
+| `projection-benchmark [--text STR]` | Test relational projection against matched controls |
+| `trit-overlay` | Overlay trit classes on binary prefix-code space |
 | `geoseal-encrypt --lat N --lon N --tag T --text STR` | Wrap in context envelope |
 | `geoseal-decrypt --sealed JSON [--expect-tag T]` | Verify and unwrap |
 | `tongues` | List all six with weights |
