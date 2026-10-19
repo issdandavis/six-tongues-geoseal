@@ -12,11 +12,11 @@ import os
 import subprocess
 import sys
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import aethermoore
 import newton_tube
-
 
 ROOT = Path(__file__).resolve().parent
 TRIANGULAR = bytes([1, 3, 6, 10, 15])
@@ -83,13 +83,53 @@ class NewtonFaceTests(unittest.TestCase):
         for number in (-13, -1, 0, 1, 7, 32):
             digits = newton_tube.to_bal3(number)
             self.assertEqual(newton_tube.from_bal3(digits), number)
-            self.assertEqual(newton_tube.from_bal3([-digit for digit in digits]), -number)
+            self.assertEqual(
+                newton_tube.from_bal3([-digit for digit in digits]), -number
+            )
             self.assertEqual(newton_tube.to_bal3(0), [0])
+
+    def test_balanced_ternary_rejects_noncanonical_spellings(self) -> None:
+        for digits in ([], [1, 0], [0, 0], [2], [True]):
+            with self.subTest(digits=digits), self.assertRaises(ValueError):
+                newton_tube.from_bal3(digits)
+
+    def test_malformed_rail_directions_are_rejected(self) -> None:
+        malformed = {"positive": 0, "negative": 1, "both": 1, "zero": False}
+        self.assertFalse(newton_tube.rails_hold(1, malformed))
+        self.assertTrue(newton_tube.rails_hold(1, newton_tube.coefficient_rails(1)))
+
+    def test_linear_memory_path_matches_full_triangle(self) -> None:
+        for values in ([1], [1, 3, 6, 10, 15], [1, 4, 2, 8, 3], list(range(32))):
+            rows = newton_tube.difference_rows(values)
+            leading, first = newton_tube.leading_coefficients(values)
+            self.assertEqual(leading, [row[0] for row in rows])
+            self.assertEqual(first, rows[1] if len(rows) > 1 else [])
+
+    def test_local_differences_are_causal_and_bounded(self) -> None:
+        values = [10, 12, 17, 16, 30]
+        features = newton_tube.causal_local_differences(values, max_order=2)
+        self.assertEqual(
+            features,
+            [[10, None, None], [12, 2, None], [17, 5, 3], [16, -1, -6], [30, 14, 15]],
+        )
+        for end in range(1, len(values) + 1):
+            self.assertEqual(
+                newton_tube.causal_local_differences(values[:end], max_order=2),
+                features[:end],
+            )
+
+    def test_public_board_surface_is_bounded(self) -> None:
+        newton_tube.operation_tube(bytes(newton_tube.MAX_BOARD_BYTES))
+        with self.assertRaises(ValueError):
+            newton_tube.operation_tube(bytes(newton_tube.MAX_BOARD_BYTES + 1))
 
 
 class StreamTests(unittest.TestCase):
     def test_six_tongues_are_one_board(self) -> None:
-        tongues = {tongue: aethermoore.encode(TRIANGULAR, tongue) for tongue in aethermoore.TONGUES}
+        tongues = {
+            tongue: aethermoore.encode(TRIANGULAR, tongue)
+            for tongue in aethermoore.TONGUES
+        }
         self.assertEqual(len(tongues), 6)
         self.assertEqual(len(set(tongues.values())), 6)
         for tongue, stream in tongues.items():
@@ -98,7 +138,9 @@ class StreamTests(unittest.TestCase):
         self.assertEqual(record["newton"]["degree"], 2)
         self.assertFalse(record["atomic"]["present"])
         self.assertIsNone(record["seal"])
-        self.assertEqual(record["shape"]["rails"], ["positive", "negative", "both", "zero"])
+        self.assertEqual(
+            record["shape"]["rails"], ["positive", "negative", "both", "zero"]
+        )
 
     def test_atomic_stamps_stay_beside_the_board(self) -> None:
         stamped = newton_tube.stamp_words(["not", "run", "feature_0"])
@@ -117,9 +159,11 @@ class StreamTests(unittest.TestCase):
         self.assertEqual(synthetic["semantic_source"], "synthetic-or-nonlexical")
 
     def test_seal_binds_the_same_board(self) -> None:
-        os.environ["GEOSEAL_KEY"] = "newton-tube-unit-key"
-        sealed = aethermoore.geoseal_encrypt(TRIANGULAR, lat=0.0, lon=0.0, tag="tube")
-        opened = aethermoore.geoseal_decrypt(sealed, expect_tag="tube")
+        with patch.dict(os.environ, {"GEOSEAL_KEY": "newton-tube-unit-key"}):
+            sealed = aethermoore.geoseal_encrypt(
+                TRIANGULAR, lat=0.0, lon=0.0, tag="tube"
+            )
+            opened = aethermoore.geoseal_decrypt(sealed, expect_tag="tube")
         self.assertEqual(opened, TRIANGULAR)
         record = newton_tube.stream_record(TRIANGULAR, seal=sealed)
         self.assertEqual(record["seal"]["context"]["version"], 1)
@@ -128,7 +172,13 @@ class StreamTests(unittest.TestCase):
 
     def test_streams_command_prints_the_degree(self) -> None:
         completed = subprocess.run(
-            [sys.executable, str(ROOT / "aethermoore.py"), "streams", "--hex", TRIANGULAR.hex()],
+            [
+                sys.executable,
+                str(ROOT / "aethermoore.py"),
+                "streams",
+                "--hex",
+                TRIANGULAR.hex(),
+            ],
             check=False,
             capture_output=True,
             text=True,
@@ -143,6 +193,23 @@ class StreamTests(unittest.TestCase):
             self.assertEqual(aethermoore.decode(stream, tongue), TRIANGULAR)
         self.assertFalse(record["atomic"]["present"])
         self.assertIsNone(record["seal"])
+
+    def test_streams_command_rejects_oversized_board(self) -> None:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "aethermoore.py"),
+                "streams",
+                "--hex",
+                bytes(newton_tube.MAX_BOARD_BYTES + 1).hex(),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            cwd=ROOT,
+        )
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("limited to 512", completed.stderr)
 
 
 if __name__ == "__main__":

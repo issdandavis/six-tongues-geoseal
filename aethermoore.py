@@ -1985,6 +1985,12 @@ def _streams_command(args) -> int:
         if not board:
             print("error: no input (use --text, --hex, or pipe)", file=sys.stderr)
             return 2
+    if len(board) > newton_tube.MAX_BOARD_BYTES:
+        print(
+            f"error: streams is limited to {newton_tube.MAX_BOARD_BYTES} board bytes",
+            file=sys.stderr,
+        )
+        return 2
 
     tongues = {tongue: encode(board, tongue) for tongue in TONGUES}
     atomic = None

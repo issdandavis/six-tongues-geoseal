@@ -155,6 +155,24 @@ python aethermoore.py trit-overlay --trit-depth 2 --binary-depth 4
 This keeps the compression idea mathematical: ternary intervals are compared
 against binary code cells, and their ideal binary cost is `depth * log2(3)`.
 
+### Newton operation tube
+
+Read one byte board as six tongue roads plus an exact Newton
+forward-difference face:
+
+```bash
+python aethermoore.py streams --hex 0103060a0f
+python aethermoore.py streams --text "hello" --words not,run
+```
+
+The board length, signed coefficients, canonical balanced-ternary spellings,
+polarity, and zero edges round-trip.  This is an algebraic view, not a model
+score.  Full high-order coefficients expand ordinary text sharply, so model
+experiments should use the bounded causal local-difference surface and matched
+controls described in
+[`docs/NEWTON_OPERATION_TUBE_AUDIT.md`](docs/NEWTON_OPERATION_TUBE_AUDIT.md).
+The CLI caps one board at 512 bytes; window larger payloads with explicit offsets.
+
 ### GeoSeal
 
 Wraps a payload with a context envelope:

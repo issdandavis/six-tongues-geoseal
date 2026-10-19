@@ -41,7 +41,6 @@ from math import comb
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
-
 SHAPE: dict[str, Any] = {
     "cross_section": "six tongue roads on one byte board",
     "axis": "operation index",
@@ -49,6 +48,11 @@ SHAPE: dict[str, Any] = {
     "rails": ["positive", "negative", "both", "zero"],
     "atomic": "seven-element destination consulted beside the board",
 }
+
+# The exact transform is quadratic in time.  Model contexts in the current
+# Clay work are 512 bytes, so the public board surface refuses larger inputs
+# instead of turning an accidental large pipe into an unbounded analysis job.
+MAX_BOARD_BYTES = 512
 
 _ATOMIC_MODULE: Any = None
 _ATOMIC_TRIED = False
@@ -81,13 +85,11 @@ def coefficient_rails(coefficient: int) -> dict[str, Any]:
 
 def rails_hold(coefficient: int, rails: Mapping[str, Any]) -> bool:
     """True when the four rails are the split of this coefficient."""
-    positive = rails["positive"]
-    negative = rails["negative"]
     return (
-        positive + negative == coefficient
-        and rails["both"] == coefficient
-        and bool(rails["zero"]) == (coefficient == 0)
-        and not (positive and negative)
+        rails.get("positive") == max(coefficient, 0)
+        and rails.get("negative") == min(coefficient, 0)
+        and rails.get("both") == coefficient
+        and rails.get("zero") == (coefficient == 0)
     )
 
 
@@ -106,8 +108,23 @@ def to_bal3(number: int) -> list[int]:
 
 
 def from_bal3(digits: Sequence[int]) -> int:
-    """Invert ``to_bal3``. Place i has weight 3**i."""
-    return sum(int(digit) * (3**place) for place, digit in enumerate(digits))
+    """Invert one canonical ``to_bal3`` spelling.
+
+    Empty strings, out-of-alphabet values, and redundant high zeroes are
+    rejected.  Without that check, ``[1]`` and ``[1, 0]`` would be two names
+    for the same integer and this surface would not be bijective.
+    """
+    values = list(digits)
+    if not values:
+        raise ValueError("balanced ternary needs at least one digit")
+    if any(type(digit) is not int or digit not in (-1, 0, 1) for digit in values):
+        raise ValueError("balanced ternary digits must be -1, 0, or 1")
+    if len(values) > 1 and values[-1] == 0:
+        raise ValueError("balanced ternary has a redundant high zero")
+    number = sum(digit * (3**place) for place, digit in enumerate(values))
+    if to_bal3(number) != values:
+        raise ValueError("balanced ternary spelling is not canonical")
+    return number
 
 
 def difference_rows(samples: Sequence[int]) -> list[list[int]]:
@@ -117,6 +134,58 @@ def difference_rows(samples: Sequence[int]) -> list[list[int]]:
         previous = rows[-1]
         rows.append([previous[i + 1] - previous[i] for i in range(len(previous) - 1)])
     return rows
+
+
+def leading_coefficients(samples: Sequence[int]) -> tuple[list[int], list[int]]:
+    """Return Newton leading coefficients and the first-difference row.
+
+    Only the current row is retained, reducing working memory from quadratic
+    to linear.  Runtime remains quadratic because every difference is exact.
+    """
+    current = [int(sample) for sample in samples]
+    leading: list[int] = []
+    first: list[int] = []
+    while current:
+        leading.append(current[0])
+        if len(current) == 1:
+            break
+        current = [
+            current[index + 1] - current[index] for index in range(len(current) - 1)
+        ]
+        if len(leading) == 1:
+            first = list(current)
+    return leading, first
+
+
+def causal_local_differences(
+    samples: Sequence[int], max_order: int = 2
+) -> list[list[Optional[int]]]:
+    """Bounded, position-aligned difference features with no future access.
+
+    At position ``i``, order ``k`` uses samples ``i-k .. i``.  Missing history
+    is ``None`` rather than zero, so padding cannot be mistaken for an edge.
+    This is the model-facing candidate; it is separate from the complete
+    Newton leading vector used for exact board reconstruction.
+    """
+    if max_order < 0 or max_order > 8:
+        raise ValueError("max_order must be between 0 and 8")
+    values = [int(sample) for sample in samples]
+    levels = [values]
+    for _ in range(max_order):
+        previous = levels[-1]
+        levels.append(
+            [
+                previous[index + 1] - previous[index]
+                for index in range(len(previous) - 1)
+            ]
+        )
+    return [
+        [
+            levels[order][index - order] if index >= order else None
+            for order in range(max_order + 1)
+        ]
+        for index in range(len(values))
+    ]
 
 
 def recover_leading(leading: Sequence[int]) -> list[int]:
@@ -144,7 +213,9 @@ def recover_active(active: Sequence[int], length: int) -> list[int]:
         raise ValueError("length must be non-negative")
     if length < len(active):
         raise ValueError("length is shorter than the active coefficients")
-    leading = [int(coefficient) for coefficient in active] + [0] * (length - len(active))
+    leading = [int(coefficient) for coefficient in active] + [0] * (
+        length - len(active)
+    )
     return recover_leading(leading)
 
 
@@ -171,8 +242,7 @@ def newton_face(samples: Sequence[int]) -> dict[str, Any]:
             "closed": True,
         }
 
-    rows = difference_rows(values)
-    leading = [row[0] for row in rows]
+    leading, step_row = leading_coefficients(values)
     degree = None
     for order, coefficient in enumerate(leading):
         if coefficient != 0:
@@ -184,7 +254,6 @@ def newton_face(samples: Sequence[int]) -> dict[str, Any]:
     if recover_active(active, length) != values:
         raise RuntimeError("trimmed Newton coefficients did not recover the sequence")
 
-    step_row = rows[1] if length > 1 else []
     return {
         "length": length,
         "degree": degree,
@@ -210,6 +279,8 @@ def newton_face(samples: Sequence[int]) -> dict[str, Any]:
 
 def operation_tube(board: bytes) -> dict[str, Any]:
     """Newton face of a byte board. Each byte is one operation."""
+    if len(board) > MAX_BOARD_BYTES:
+        raise ValueError(f"operation tube is limited to {MAX_BOARD_BYTES} board bytes")
     face = newton_face(list(board))
     face["board_hex"] = board.hex()
     return face
@@ -223,7 +294,9 @@ def _atomic_candidates() -> list[Path]:
     candidates.append(
         Path(r"C:\Users\issda\SCBE-AETHERMOORE\python\scbe\atomic_tokenization.py")
     )
-    candidates.append(Path(r"C:\dev\SCBE-AETHERMOORE\python\scbe\atomic_tokenization.py"))
+    candidates.append(
+        Path(r"C:\dev\SCBE-AETHERMOORE\python\scbe\atomic_tokenization.py")
+    )
     return candidates
 
 
@@ -236,7 +309,9 @@ def atomic_module() -> Any:
     for path in _atomic_candidates():
         if not path.is_file():
             continue
-        spec = importlib.util.spec_from_file_location("scbe_atomic_tokenization_tube", path)
+        spec = importlib.util.spec_from_file_location(
+            "scbe_atomic_tokenization_tube", path
+        )
         if spec is None or spec.loader is None:
             continue
         module = importlib.util.module_from_spec(spec)
@@ -303,6 +378,10 @@ def stream_record(
         "shape": SHAPE,
         "newton": operation_tube(board),
         "tongues": None if tongues is None else dict(tongues),
-        "atomic": dict(atomic) if atomic is not None else {"role": "destination", "present": False},
+        "atomic": (
+            dict(atomic)
+            if atomic is not None
+            else {"role": "destination", "present": False}
+        ),
         "seal": None if seal is None else dict(seal),
     }
