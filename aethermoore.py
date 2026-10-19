@@ -12,6 +12,7 @@ A self-contained Python CLI for:
 - 'predict-compress' subcommand: score causal next-byte predictions as ideal bits
 - 'projection-benchmark' subcommand: test aperiodic relational projections
 - 'trit-overlay' subcommand: overlay ternary prefixes on binary code space
+- 'streams' subcommand: one byte board read as six tongues, a Newton tangent, and optional stamps
 - Built-in selftest
 
 Stdlib only (no required pip deps). Optional: HF_TOKEN for the explain
@@ -32,6 +33,8 @@ Usage:
     python aethermoore.py predict-compress --max-order 3 --text "hello hello hello"
     Get-Content -Raw README.md | python aethermoore.py projection-benchmark
     python aethermoore.py trit-overlay --trit-depth 2 --binary-depth 4
+    python aethermoore.py streams --hex 0103060a0f
+    python aethermoore.py streams --text "hello" --words not,run --seal --lat 48.118 --lon -123.430
 
 Author: Issac Davis
 License: MIT
@@ -1959,6 +1962,48 @@ def _read_text(args) -> bytes:
     return b""
 
 
+def _streams_command(args) -> int:
+    """Print the operation tube for one board.
+
+    Tongue streams are the six roads. Newton coefficients are the tangent
+    along operation order. Word stamps and the GeoSeal envelope are attached
+    only when the caller asks for them.
+    """
+    import newton_tube
+
+    if args.hex and args.text:
+        print("error: pass --hex or --text, not both", file=sys.stderr)
+        return 2
+    if args.hex:
+        try:
+            board = bytes.fromhex(args.hex)
+        except ValueError as exc:
+            print(f"error: bad hex -- {exc}", file=sys.stderr)
+            return 2
+    else:
+        board = _read_text(args)
+        if not board:
+            print("error: no input (use --text, --hex, or pipe)", file=sys.stderr)
+            return 2
+
+    tongues = {tongue: encode(board, tongue) for tongue in TONGUES}
+    atomic = None
+    if args.words is not None:
+        words = [word.strip() for word in args.words.split(",") if word.strip()]
+        if not words:
+            print("error: --words needs at least one token", file=sys.stderr)
+            return 2
+        atomic = newton_tube.stamp_words(words)
+    seal = None
+    if args.seal:
+        if args.lat is None or args.lon is None:
+            print("error: --seal needs --lat and --lon", file=sys.stderr)
+            return 2
+        seal = geoseal_encrypt(board, args.lat, args.lon, tag=args.tag)
+    print(json.dumps(newton_tube.stream_record(board, tongues=tongues, atomic=atomic, seal=seal), indent=2))
+    return 0
+
+
 def main() -> int:
     # ``clay.train`` owns a richer conversational argument surface.  Dispatch
     # before this module's parser so options such as ``--home`` and ``--model``
@@ -2075,6 +2120,21 @@ def main() -> int:
     p_to.add_argument("--trit-depth", type=int, default=2, help="Ternary prefix depth, 1..6")
     p_to.add_argument("--binary-depth", type=int, default=4, help="Binary prefix depth, 1..12")
     p_to.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+
+    p_streams = sub.add_parser(
+        "streams",
+        help="Read one byte board as tongues, a Newton tangent, and optional atomic and seal streams",
+    )
+    p_streams.add_argument("--text", help="UTF-8 text whose bytes are the board")
+    p_streams.add_argument("--hex", help="Even-length hex of the board bytes")
+    p_streams.add_argument(
+        "--words",
+        help="Comma-separated linguistic tokens. Destination stamps, not Newton samples.",
+    )
+    p_streams.add_argument("--seal", action="store_true", help="Bind the board bytes with GeoSeal")
+    p_streams.add_argument("--lat", type=float)
+    p_streams.add_argument("--lon", type=float)
+    p_streams.add_argument("--tag", default="")
 
     p_ub = sub.add_parser("unblend", help="Unblend a multi-tongue stream")
     p_ub.add_argument("--pattern", required=True)
@@ -2241,6 +2301,9 @@ def main() -> int:
             print(f"error: {e}", file=sys.stderr)
             return 2
         return 0
+
+    if args.cmd == "streams":
+        return _streams_command(args)
 
     if args.cmd == "unblend":
         stream = args.text
