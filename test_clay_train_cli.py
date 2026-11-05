@@ -28,6 +28,108 @@ class ClayTrainingStudioTests(unittest.TestCase):
         self.addCleanup(self.key.stop)
         self.studio = ClayTrainingStudio(Path(self.temp.name), "test")
 
+    def _write_cluster_parent_pointer(self) -> Path:
+        root = Path(self.temp.name) / "cluster-parent"
+        root.mkdir()
+        checkpoint = root / "round_0018.pt"
+        data = root / "foundation.jsonl"
+        grid_path = root / "round_0018.opcode_grid.json"
+        full_eval_path = root / "round_0018.full_eval.json"
+        decision_path = root / "BINDING_CANDIDATE.json"
+        pointer_path = root / "STABLE_OPCODE_PARENT.json"
+        checkpoint.write_bytes(b"scoped-parent-checkpoint")
+        data.write_text('{"prompt":"V op:add:d0"}\n', encoding="utf-8")
+        checkpoint_hash = file_sha256(checkpoint)
+        data_hash = file_sha256(data)
+        metrics = {
+            "direct_grid_exact": 1.0,
+            "direct_grid_cells": 256,
+            "direct_heldout_exact": 1.0,
+            "direct_heldout_cells": 33,
+            "mixed_heldout_binding_exact": 0.7445887445887446,
+            "mixed_heldout_parse_rate": 0.9913419913419913,
+            "heldout_loss": 0.20906046777963638,
+            "heldout_content_top1": 0.914644776986779,
+        }
+        grid_path.write_text(
+            json.dumps(
+                {
+                    "schema": "clay_cluster_opcode_grid_eval_v1",
+                    "checkpoint_sha256": checkpoint_hash,
+                    "data_sha256": data_hash,
+                    "grid": {"buses": 64, "depths": 4, "cells": 256},
+                    "metrics": {
+                        "all": {"records": 256, "exact": 1.0},
+                        "heldout": {"records": 33, "exact": 1.0},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        full_eval_path.write_text(
+            json.dumps(
+                {
+                    "schema": "clay_cluster_full_heldout_eval_v1",
+                    "checkpoint_sha256": checkpoint_hash,
+                    "data_sha256": data_hash,
+                    "metrics": {
+                        "binding": {
+                            "free_running_exact": metrics["mixed_heldout_binding_exact"],
+                            "parse_rate": metrics["mixed_heldout_parse_rate"],
+                        },
+                        "token": {
+                            "loss": metrics["heldout_loss"],
+                            "content_top1": metrics["heldout_content_top1"],
+                        },
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        decision_path.write_text(
+            json.dumps(
+                {
+                    "schema": "clay_cluster_binding_candidate_v2",
+                    "selected": {"checkpoint_sha256": checkpoint_hash},
+                    "gate": {
+                        "preregistered_full_gate": {"passed": False},
+                        "scoped_direct_control_check": {"passed": True},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        pointer_path.write_text(
+            json.dumps(
+                {
+                    "schema": "clay_cluster_scoped_parent_v1",
+                    "status": "SCOPED_PARENT",
+                    "scope": "Direct V op:<bus>:d<0..3> opcode-control routing",
+                    "checkpoint": str(checkpoint),
+                    "checkpoint_sha256": checkpoint_hash,
+                    "code_revision": "test-revision",
+                    "data": str(data),
+                    "data_sha256": data_hash,
+                    "metrics": metrics,
+                    "evidence": {
+                        "opcode_grid": str(grid_path),
+                        "opcode_grid_sha256": file_sha256(grid_path),
+                        "full_eval": str(full_eval_path),
+                        "full_eval_sha256": file_sha256(full_eval_path),
+                        "decision": str(decision_path),
+                        "decision_sha256": file_sha256(decision_path),
+                    },
+                    "claim_boundary": "direct routing only",
+                    "full_promotion_gate_passed": False,
+                    "exact_resume": False,
+                    "resume_boundary": "worker optimizer state omitted",
+                    "next_phase": "verified operand execution",
+                }
+            ),
+            encoding="utf-8",
+        )
+        return pointer_path
+
     def test_state_and_event_chain_survive_reload(self) -> None:
         self.studio.handle_command("/goal teach Clay from owner corrections")
         ok, count, _ = self.studio.verify_events()
@@ -290,6 +392,64 @@ class ClayTrainingStudioTests(unittest.TestCase):
         self.assertEqual(first["summary_sha256"], second["summary_sha256"])
         self.assertEqual(len(self.studio.state["opcode_graph"]["internalization_runs"]), 1)
         self.assertEqual(first["promotion"], "none; evidence receipt only")
+
+    def test_cluster_parent_import_verifies_selects_and_deduplicates(self) -> None:
+        pointer = self._write_cluster_parent_pointer()
+        first = json.loads(
+            self.studio.handle_command(f'/opcode cluster import "{pointer}"')
+        )
+        second = self.studio.opcode_cluster_import(str(pointer))
+
+        self.assertEqual(first["checkpoint_sha256"], second["checkpoint_sha256"])
+        self.assertEqual(first["status"], "SCOPED_PARENT")
+        self.assertFalse(first["full_promotion_gate_passed"])
+        self.assertEqual(
+            first["execution_authority"], "deterministic compiler remains authoritative"
+        )
+        self.assertEqual(len(self.studio.state["opcode_graph"]["cluster_parent_runs"]), 1)
+        self.assertEqual(
+            self.studio.state["opcode_graph"]["selected_cluster_parent"][
+                "checkpoint_sha256"
+            ],
+            first["checkpoint_sha256"],
+        )
+        sealed = (
+            self.studio.artifacts
+            / "opcode-cluster-parent"
+            / first["run_id"]
+            / "receipt.geoseal.json"
+        )
+        self.assertTrue(sealed.is_file())
+        self.assertTrue(self.studio.verify_events()[0])
+
+    def test_cluster_parent_import_rejects_a_tampered_artifact(self) -> None:
+        pointer = self._write_cluster_parent_pointer()
+        payload = json.loads(pointer.read_text(encoding="utf-8"))
+        Path(payload["checkpoint"]).write_bytes(b"tampered-checkpoint")
+        with self.assertRaisesRegex(ValueError, "checkpoint SHA-256 mismatch"):
+            self.studio.opcode_cluster_import(str(pointer))
+
+    def test_cluster_parent_import_rejects_semantically_false_hashed_evidence(self) -> None:
+        pointer = self._write_cluster_parent_pointer()
+        payload = json.loads(pointer.read_text(encoding="utf-8"))
+        grid_path = Path(payload["evidence"]["opcode_grid"])
+        grid = json.loads(grid_path.read_text(encoding="utf-8"))
+        grid["metrics"]["all"]["exact"] = 0.5
+        grid_path.write_text(json.dumps(grid), encoding="utf-8")
+        payload["evidence"]["opcode_grid_sha256"] = file_sha256(grid_path)
+        pointer.write_text(json.dumps(payload), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "not exact across all 256 cells"):
+            self.studio.opcode_cluster_import(str(pointer))
+
+    def test_cluster_parent_import_refuses_a_broken_event_journal(self) -> None:
+        pointer = self._write_cluster_parent_pointer()
+        lines = self.studio.events_path.read_text(encoding="utf-8").splitlines()
+        event = json.loads(lines[0])
+        event["previous"] = "f" * 64
+        lines[0] = json.dumps(event)
+        self.studio.events_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "event journal integrity is broken"):
+            self.studio.opcode_cluster_import(str(pointer))
 
     def test_conversation_routes_english_block_training(self) -> None:
         result = self.studio.interpret(

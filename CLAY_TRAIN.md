@@ -117,6 +117,25 @@ clay.train> /opcode hatch local
 clay.train> /opcode status
 ```
 
+## Hash-verified cluster parent
+
+`/opcode cluster import POINTER.json` attaches a completed `clay-cluster`
+checkpoint through the existing GeoSeal CLI. The command verifies the pointer,
+checkpoint, training data, complete 64-by-4 direct-opcode grid, broad held-out
+evaluation, and selection decision by SHA-256 before writing a sealed receipt.
+It refuses to write when the session event journal is broken.
+
+The imported checkpoint remains a scoped parent. Selection means that it may
+seed the next direct opcode-control experiment; it does not grant tool or
+compiler authority, claim conversational ability, or turn a missed broad gate
+into a promotion. Use a dedicated single-writer session for each lineage:
+
+```powershell
+clay.train --session cluster-binding-20261104 --command "/opcode cluster import C:\dev\clay-cluster\STABLE_OPCODE_PARENT.json"
+clay.train --session cluster-binding-20261104 --command "/opcode cluster status"
+clay.train --session cluster-binding-20261104 --status
+```
+
 ## Measured representation seams
 
 `/representations` exposes the 2026-08-05 census across `C:\dev` and

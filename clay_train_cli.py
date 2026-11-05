@@ -344,6 +344,8 @@ class ClayTrainingStudio:
         opcode_graph.setdefault("latest_hatchery_summary", None)
         opcode_graph.setdefault("internalization_runs", [])
         opcode_graph.setdefault("latest_internalization_summary", None)
+        opcode_graph.setdefault("cluster_parent_runs", [])
+        opcode_graph.setdefault("selected_cluster_parent", None)
         english_blocks = self.state.setdefault("english_blocks", {})
         english_blocks.setdefault("runs", [])
         english_blocks.setdefault("latest_summary", None)
@@ -417,6 +419,8 @@ class ClayTrainingStudio:
                 "latest_hatchery_summary": None,
                 "internalization_runs": [],
                 "latest_internalization_summary": None,
+                "cluster_parent_runs": [],
+                "selected_cluster_parent": None,
             },
             "english_blocks": {
                 "runs": [],
@@ -1544,6 +1548,202 @@ class ClayTrainingStudio:
         self.record("opcode_internalization_imported", receipt)
         return receipt
 
+    @staticmethod
+    def _scoped_parent_artifact(pointer_path: Path, raw_path: Any) -> Path:
+        """Resolve one artifact named by a scoped-parent pointer."""
+
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            raise ValueError("scoped-parent artifact path is missing")
+        path = Path(raw_path).expanduser()
+        if not path.is_absolute():
+            path = pointer_path.parent / path
+        return path.resolve()
+
+    @staticmethod
+    def _verify_scoped_parent_artifact(
+        pointer_path: Path,
+        raw_path: Any,
+        expected_sha256: Any,
+        label: str,
+    ) -> tuple[Path, str]:
+        """Resolve and hash one artifact, refusing missing or altered evidence."""
+
+        path = ClayTrainingStudio._scoped_parent_artifact(pointer_path, raw_path)
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        if not isinstance(expected_sha256, str) or not re.fullmatch(
+            r"[0-9a-fA-F]{64}", expected_sha256
+        ):
+            raise ValueError(f"{label} SHA-256 is missing or malformed")
+        actual = file_sha256(path)
+        if actual != expected_sha256.lower():
+            raise ValueError(
+                f"{label} SHA-256 mismatch: expected {expected_sha256.lower()}, got {actual}"
+            )
+        return path, actual
+
+    def opcode_cluster_import(self, raw_pointer: str) -> dict[str, Any]:
+        """Select a hash-verified cluster checkpoint for its measured opcode scope.
+
+        This imports evidence and a parent pointer. It does not grant execution
+        authority or promote the checkpoint as a general language model.
+        """
+
+        integrity_ok, event_count, _ = self.verify_events()
+        if not integrity_ok:
+            raise ValueError(
+                "event journal integrity is broken; scoped-parent import refused "
+                f"after {event_count} verified events. Use a fresh --session or "
+                "audit the existing journal before writing more events."
+            )
+
+        pointer_path = Path(raw_pointer).expanduser().resolve()
+        if not pointer_path.is_file():
+            raise FileNotFoundError(pointer_path)
+        pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+        if pointer.get("schema") != "clay_cluster_scoped_parent_v1":
+            raise ValueError("not a Clay cluster scoped-parent pointer")
+        if pointer.get("status") != "SCOPED_PARENT":
+            raise ValueError("cluster pointer is not labelled SCOPED_PARENT")
+        if pointer.get("full_promotion_gate_passed") is not False:
+            raise ValueError("cluster pointer must preserve the unmet full-promotion gate")
+        scope = pointer.get("scope")
+        if not isinstance(scope, str) or not scope.startswith("Direct V op:"):
+            raise ValueError("cluster pointer does not declare the tested direct-opcode scope")
+
+        metrics = pointer.get("metrics")
+        if not isinstance(metrics, dict):
+            raise ValueError("cluster pointer metrics are missing")
+        required_metrics = {
+            "direct_grid_exact": 1.0,
+            "direct_grid_cells": 256,
+            "direct_heldout_exact": 1.0,
+            "direct_heldout_cells": 33,
+        }
+        for name, expected in required_metrics.items():
+            if metrics.get(name) != expected:
+                raise ValueError(
+                    f"cluster pointer {name} must be {expected!r}, got {metrics.get(name)!r}"
+                )
+
+        checkpoint_path, checkpoint_hash = self._verify_scoped_parent_artifact(
+            pointer_path,
+            pointer.get("checkpoint"),
+            pointer.get("checkpoint_sha256"),
+            "checkpoint",
+        )
+        data_path, data_hash = self._verify_scoped_parent_artifact(
+            pointer_path,
+            pointer.get("data"),
+            pointer.get("data_sha256"),
+            "training data",
+        )
+        evidence = pointer.get("evidence")
+        if not isinstance(evidence, dict):
+            raise ValueError("cluster pointer evidence map is missing")
+        evidence_specs = {
+            "opcode_grid": "opcode-grid evidence",
+            "full_eval": "full-eval evidence",
+            "decision": "selection-decision evidence",
+        }
+        verified_evidence: dict[str, dict[str, str]] = {}
+        evidence_payloads: dict[str, dict[str, Any]] = {}
+        for name, label in evidence_specs.items():
+            path, digest = self._verify_scoped_parent_artifact(
+                pointer_path,
+                evidence.get(name),
+                evidence.get(f"{name}_sha256"),
+                label,
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError(f"{label} must contain a JSON object")
+            evidence_payloads[name] = payload
+            verified_evidence[name] = {"path": str(path), "sha256": digest}
+
+        grid = evidence_payloads["opcode_grid"]
+        if grid.get("schema") != "clay_cluster_opcode_grid_eval_v1":
+            raise ValueError("opcode-grid evidence has the wrong schema")
+        if grid.get("checkpoint_sha256") != checkpoint_hash:
+            raise ValueError("opcode-grid evidence names a different checkpoint")
+        if grid.get("data_sha256") != data_hash:
+            raise ValueError("opcode-grid evidence names different training data")
+        if grid.get("grid") != {"buses": 64, "depths": 4, "cells": 256}:
+            raise ValueError("opcode-grid evidence is not the complete 64 by 4 grid")
+        if grid.get("metrics", {}).get("all", {}).get("exact") != 1.0:
+            raise ValueError("opcode-grid evidence is not exact across all 256 cells")
+        grid_heldout = grid.get("metrics", {}).get("heldout", {})
+        if grid_heldout.get("records") != 33 or grid_heldout.get("exact") != 1.0:
+            raise ValueError("opcode-grid heldout evidence is not 33/33 exact")
+
+        full_eval = evidence_payloads["full_eval"]
+        if full_eval.get("schema") != "clay_cluster_full_heldout_eval_v1":
+            raise ValueError("full-eval evidence has the wrong schema")
+        if full_eval.get("checkpoint_sha256") != checkpoint_hash:
+            raise ValueError("full-eval evidence names a different checkpoint")
+        if full_eval.get("data_sha256") != data_hash:
+            raise ValueError("full-eval evidence names different training data")
+        binding = full_eval.get("metrics", {}).get("binding", {})
+        token = full_eval.get("metrics", {}).get("token", {})
+        metric_cross_checks = {
+            "mixed_heldout_binding_exact": binding.get("free_running_exact"),
+            "mixed_heldout_parse_rate": binding.get("parse_rate"),
+            "heldout_loss": token.get("loss"),
+            "heldout_content_top1": token.get("content_top1"),
+        }
+        for name, observed in metric_cross_checks.items():
+            if metrics.get(name) != observed:
+                raise ValueError(f"cluster pointer {name} disagrees with full-eval evidence")
+
+        decision = evidence_payloads["decision"]
+        if decision.get("schema") != "clay_cluster_binding_candidate_v2":
+            raise ValueError("selection-decision evidence has the wrong schema")
+        if decision.get("selected", {}).get("checkpoint_sha256") != checkpoint_hash:
+            raise ValueError("selection decision names a different checkpoint")
+        full_gate = decision.get("gate", {}).get("preregistered_full_gate", {})
+        scoped_gate = decision.get("gate", {}).get("scoped_direct_control_check", {})
+        if full_gate.get("passed") is not False or scoped_gate.get("passed") is not True:
+            raise ValueError("selection decision does not preserve the measured gate boundary")
+
+        pointer_hash = file_sha256(pointer_path)
+        for existing in self.state["opcode_graph"]["cluster_parent_runs"]:
+            if existing.get("checkpoint_sha256") == checkpoint_hash:
+                return existing
+
+        run_id = f"opcode-cluster-parent-{int(time.time())}-{uuid.uuid4().hex[:6]}"
+        receipt = {
+            "schema": "clay.train.opcode-cluster-parent-receipt.v1",
+            "run_id": run_id,
+            "status": "SCOPED_PARENT",
+            "scope": scope,
+            "pointer": str(pointer_path),
+            "pointer_sha256": pointer_hash,
+            "checkpoint": str(checkpoint_path),
+            "checkpoint_sha256": checkpoint_hash,
+            "code_revision": pointer.get("code_revision"),
+            "data": str(data_path),
+            "data_sha256": data_hash,
+            "metrics": metrics,
+            "evidence": verified_evidence,
+            "claim_boundary": pointer.get("claim_boundary"),
+            "full_promotion_gate_passed": False,
+            "exact_resume": pointer.get("exact_resume") is True,
+            "resume_boundary": pointer.get("resume_boundary"),
+            "next_phase": pointer.get("next_phase"),
+            "selection": "selected for direct opcode-control experiments only",
+            "execution_authority": "deterministic compiler remains authoritative",
+            "external_execution_started": False,
+        }
+        target = self.artifacts / "opcode-cluster-parent" / run_id
+        sealed = geoseal_encrypt(
+            canonical_json(receipt), 0.0, 0.0, tag=f"clay.train/{run_id}"
+        )
+        atomic_json(target / "receipt.geoseal.json", sealed)
+        self.state["opcode_graph"]["cluster_parent_runs"].append(receipt)
+        self.state["opcode_graph"]["selected_cluster_parent"] = receipt
+        self.record("opcode_cluster_parent_imported", receipt)
+        return receipt
+
     # ------------------------------------------------------------------
     # English step cells -> word blocks -> executable Python -> harmonics
     # ------------------------------------------------------------------
@@ -2579,6 +2779,10 @@ class ClayTrainingStudio:
         queued = sum(c.get("status") == "queued" for c in self.state["candidates"])
         examples = sum(1 for _ in self.iter_examples())
         key_mode = "owner key" if os.environ.get("GEOSEAL_KEY") else "reproducible demo key"
+        cluster_parent = self.state["opcode_graph"].get("selected_cluster_parent") or {}
+        cluster_parent_label = cluster_parent.get("checkpoint_sha256", "(none)")
+        if cluster_parent_label != "(none)":
+            cluster_parent_label = cluster_parent_label[:12]
         return (
             f"Clay training studio [{self.session_name}]\n"
             f"  goal:       {self.state['goal']}\n"
@@ -2598,6 +2802,8 @@ class ClayTrainingStudio:
             f"{len(self.state['opcode_graph'].get('runs', []))} charged-graph runs / "
             f"{len(self.state['opcode_graph'].get('hatchery_runs', []))} hatchery runs / "
             f"{len(self.state['opcode_graph'].get('internalization_runs', []))} internalization runs / "
+            f"{len(self.state['opcode_graph'].get('cluster_parent_runs', []))} cluster parents "
+            f"(selected {cluster_parent_label}) / "
             f"latest {self.state['opcode_graph'].get('latest_internalization_summary') or self.state['opcode_graph'].get('latest_hatchery_summary') or self.state['opcode_graph'].get('latest_summary') or '(none)'}\n"
             f"  English:    {len(self.state['english_blocks'].get('runs', []))} block/function runs / "
             f"latest {self.state['english_blocks'].get('latest_summary') or '(none)'}\n"
@@ -2637,6 +2843,8 @@ class ClayTrainingStudio:
   /opcode train [SECONDS] [GENERATIONS]  PyTorch charged/flat/shuffled run
   /opcode internalize smoke|full   learn held-out word meanings with paired controls
   /opcode internalize import SUMMARY.json  attach a completed local evidence run
+  /opcode cluster import POINTER.json  hash-check and select a scoped cluster parent
+  /opcode cluster status           inspect the selected scoped parent and receipts
   /opcode hatch smoke|local        evolve a six-byte layer map, then test controls
   /opcode status
   /english train smoke|full        English boxes -> word blocks -> verified Python
@@ -2822,10 +3030,28 @@ Explicit /run commands execute immediately. No generated shell commands are used
                     )
                 profile = args[1].lower() if len(args) == 2 else "full"
                 return json.dumps(self.opcode_internalize(profile), indent=2)
+            if args[0] == "cluster":
+                action = args[1].lower() if len(args) >= 2 else "status"
+                if action == "status" and len(args) == 2:
+                    return json.dumps(
+                        {
+                            "cluster_parent_runs": self.state["opcode_graph"].get(
+                                "cluster_parent_runs", []
+                            ),
+                            "selected_cluster_parent": self.state["opcode_graph"].get(
+                                "selected_cluster_parent"
+                            ),
+                        },
+                        indent=2,
+                    )
+                if action == "import" and len(args) == 3:
+                    return json.dumps(self.opcode_cluster_import(args[2]), indent=2)
+                raise ValueError("usage: /opcode cluster status | import POINTER.json")
             raise ValueError(
                 "usage: /opcode inspect | selftest | cycle | table [GENERATION] | "
                 "train [SECONDS] [GENERATIONS] | hatch [smoke|local] | "
-                "internalize [smoke|full] | internalize import SUMMARY.json | status"
+                "internalize [smoke|full] | internalize import SUMMARY.json | "
+                "cluster status | cluster import POINTER.json | status"
             )
         if command == "/english":
             if not args or args[0] == "status":
